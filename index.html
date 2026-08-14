@@ -2033,7 +2033,7 @@ let activeSource = null; // 'local' | 'sharepoint'
   } catch(e){ /* no stored handle yet */ }
 })();
 </script>
-<script src="https://alcdn.msauth.net/browser/3.18.0/js/msal-browser.min.js"></script>
+<script src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"></script>
 <script>
 /* ===================== SharePoint Connection (Microsoft Sign-in) ===================== */
 const MSAL_CONFIG = {
@@ -2052,7 +2052,6 @@ const GRAPH_SCOPES = ['Files.Read.All','User.Read'];
 let msalInstance = null;
 async function initMsal(){
   msalInstance = new msal.PublicClientApplication(MSAL_CONFIG);
-  await msalInstance.initialize();
   const resp = await msalInstance.handleRedirectPromise();
   const accounts = msalInstance.getAllAccounts();
   if(accounts.length){
