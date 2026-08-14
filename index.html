@@ -239,8 +239,9 @@
   </span>
   <span>Data Source: <b id="conn-source" style="color:#cfe0f5;">None</b></span>
   <span>Last Refresh: <b id="conn-lastrefresh" style="color:#cfe0f5;">Never (showing last saved data)</b></span>
-  <button id="btn-connect" style="margin-left:auto;background:#2f6fed;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;font-weight:600;">Connect Data Source</button>
-  <button id="btn-refresh" style="display:none;background:#1c2b45;color:#cfe0f5;border:1px solid #35507a;padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;font-weight:600;">Refresh Data</button>
+  <button id="btn-signin" style="margin-left:auto;background:#2f6fed;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;font-weight:600;">Sign in with Microsoft</button>
+  <button id="btn-connect" style="background:#1c2b45;color:#cfe0f5;border:1px solid #35507a;padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;font-weight:600;">Use Local File Instead</button>
+  <button id="btn-refresh" style="display:none;background:#16a34a;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;font-weight:600;">Refresh Data</button>
   <span id="conn-error" style="color:#f04438;display:none;"></span>
 </div>
 
@@ -2014,18 +2015,219 @@ async function refreshFile(){
 }
 
 document.getElementById('btn-connect').addEventListener('click', connectFile);
-document.getElementById('btn-refresh').addEventListener('click', refreshFile);
+document.getElementById('btn-refresh').addEventListener('click', function(){
+  if(activeSource==='sharepoint') refreshFromSharePoint(); else refreshFile();
+});
+
+let activeSource = null; // 'local' | 'sharepoint'
 
 (async function initConn(){
   try{
     const handle = await idbGet(HANDLE_KEY);
     if(handle){
       const perm = await handle.queryPermission({mode:'read'});
+      activeSource = 'local';
       setConnUI(perm==='granted' ? 'disconnected' : 'error', handle.name, perm==='granted' ? null : 'Click "Refresh Data" to re-grant permission.');
       document.getElementById('btn-refresh').style.display='inline-block';
     }
   } catch(e){ /* no stored handle yet */ }
 })();
+</script>
+<script src="https://alcdn.msauth.net/browser/3.18.0/js/msal-browser.min.js"></script>
+<script>
+/* ===================== SharePoint Connection (Microsoft Sign-in) ===================== */
+const MSAL_CONFIG = {
+  auth: {
+    clientId: 'ca41f015-9b7b-48b8-91f7-5d0ead96f373',
+    authority: 'https://login.microsoftonline.com/e1e9c51a-dd44-4484-b860-b5dea67e162c',
+    redirectUri: window.location.origin + window.location.pathname
+  },
+  cache: { cacheLocation: 'localStorage' }
+};
+const SP_HOST = 'infotreksdnbhd.sharepoint.com';
+const SP_SITE_PATH = '/marketing';
+const SP_FOLDER_PATH = "Marketing Plan/IQ's Business Dashboard/Raw Data";
+const GRAPH_SCOPES = ['Files.Read.All','User.Read'];
+
+let msalInstance = null;
+async function initMsal(){
+  msalInstance = new msal.PublicClientApplication(MSAL_CONFIG);
+  await msalInstance.initialize();
+  const resp = await msalInstance.handleRedirectPromise();
+  const accounts = msalInstance.getAllAccounts();
+  if(accounts.length){
+    msalInstance.setActiveAccount(accounts[0]);
+    activeSource = 'sharepoint';
+    document.getElementById('btn-signin').textContent = 'Signed in as ' + accounts[0].username;
+    document.getElementById('btn-signin').disabled = true;
+    document.getElementById('btn-refresh').style.display='inline-block';
+    await refreshFromSharePoint();
+  }
+}
+
+async function getGraphToken(){
+  const account = msalInstance.getActiveAccount();
+  try{
+    const res = await msalInstance.acquireTokenSilent({scopes:GRAPH_SCOPES, account});
+    return res.accessToken;
+  } catch(e){
+    const res = await msalInstance.acquireTokenPopup({scopes:GRAPH_SCOPES});
+    msalInstance.setActiveAccount(res.account);
+    return res.accessToken;
+  }
+}
+
+async function graphGet(url, token){
+  const res = await fetch(url, {headers:{Authorization:'Bearer '+token}});
+  if(!res.ok) throw new Error(`Graph API error (${res.status}) calling ${url}`);
+  return res.json();
+}
+
+async function signInMicrosoft(){
+  try{
+    setConnUI('error', null, null);
+    const loginRes = await msalInstance.loginPopup({scopes:GRAPH_SCOPES});
+    msalInstance.setActiveAccount(loginRes.account);
+    activeSource = 'sharepoint';
+    document.getElementById('btn-signin').textContent = 'Signed in as ' + loginRes.account.username;
+    document.getElementById('btn-signin').disabled = true;
+    document.getElementById('btn-refresh').style.display='inline-block';
+    await refreshFromSharePoint();
+  } catch(e){
+    setConnUI('error', null, 'Sign-in failed: '+e.message);
+  }
+}
+
+function classifyRows(rows){
+  if(!rows.length) return null;
+  const keys = Object.keys(rows[0]).map(k=>k.trim().toLowerCase());
+  if(keys.includes('spend')) return 'spending';
+  if(keys.includes('status') || keys.includes('product principal')) return 'leads';
+  return null;
+}
+
+async function parseLeadsRows(rows, fileName, errors){
+  const kDate = findKey(rows[0], ['Date send','Date']);
+  const kEntity = findKey(rows[0], ['Entity','Business Unit']);
+  const kPl = findKey(rows[0], ['Platform']);
+  const kSrc = findKey(rows[0], ['Lead Source','Source']);
+  const kSp = findKey(rows[0], ['SP','Sales Person','Salesperson']);
+  const kCo = findKey(rows[0], ['Company','Organization','Client']);
+  const kPr = findKey(rows[0], ['Product Principal','Product']);
+  const kSt = findKey(rows[0], ['Status']);
+  const kRs = findKey(rows[0], ['Reason']);
+  const kCt = findKey(rows[0], ['Contacted']);
+  const kQt = findKey(rows[0], ['Quotation']);
+  const kQl = findKey(rows[0], ['Qualified']);
+  const kLv = findKey(rows[0], ['Value of lead','Lead Value']);
+  const kSv = findKey(rows[0], ['Value of sales','Sales Value']);
+  const missing = [];
+  if(!kDate) missing.push('Date / Date send');
+  if(!kEntity) missing.push('Entity');
+  if(!kSt) missing.push('Status');
+  if(missing.length){ errors.push(`${fileName} — missing required column(s): ${missing.join(', ')}`); return {}; }
+
+  const byEntity = {};
+  for(const row of rows){
+    const entity = String(row[kEntity]||'').trim();
+    if(entity !== 'IFT' && entity !== 'Quorse') continue;
+    const iso = excelDateToISO(row[kDate]);
+    if(!iso){ errors.push(`${fileName} — invalid date on a row, skipped`); continue; }
+    const [y,m] = iso.split('-');
+    const mnum = parseInt(m,10);
+    const qn = Math.ceil(mnum/3);
+    const rec = {
+      date: iso, month: `${y}-${m}`, mnum, year: parseInt(y,10), q: `${y}-Q${qn}`,
+      co: kCo ? row[kCo] : null, pl: kPl ? row[kPl] : null, src: kSrc ? row[kSrc] : null,
+      sp: kSp ? row[kSp] : null, pr: kPr ? row[kPr] : null, st: kSt ? row[kSt] : null,
+      rs: kRs ? row[kRs] : null, ct: kCt ? truthy(row[kCt]) : false,
+      qt: kQt ? truthy(row[kQt]) : false, ql: kQl ? truthy(row[kQl]) : false,
+      lv: kLv ? num(row[kLv]) : 0, sv: kSv ? num(row[kSv]) : 0
+    };
+    (byEntity[entity] = byEntity[entity]||[]).push(rec);
+  }
+  return byEntity;
+}
+
+function parseSpendingRows(rows, fileName, errors){
+  const kMonth = findKey(rows[0], ['Month']);
+  const kEntity = findKey(rows[0], ['Entity','Business Unit']);
+  const kPl = findKey(rows[0], ['Platform']);
+  const kSpend = findKey(rows[0], ['Spend']);
+  if(!kMonth || !kEntity || !kPl || !kSpend){
+    errors.push(`${fileName} — missing required column(s) for Spending: Date/Month, Entity, Platform, Spend`);
+    return {};
+  }
+  const byEntity = {IFT:{}, Quorse:{}};
+  const platformMap = {'website':'Website','social media':'Social Media','social':'Social Media','email':'Email','overhead':'Overhead','seo':'SEO','sem':'SEM'};
+  for(const row of rows){
+    const entity = String(row[kEntity]||'').trim();
+    if(entity !== 'IFT' && entity !== 'Quorse') continue;
+    const mo = String(row[kMonth]).trim();
+    const plKey = platformMap[String(row[kPl]||'').trim().toLowerCase()];
+    if(!mo || !plKey) continue;
+    byEntity[entity][mo] = byEntity[entity][mo] || {Website:0,'Social Media':0,Email:0,Overhead:0,SEO:0,SEM:0};
+    byEntity[entity][mo][plKey] += num(row[kSpend]);
+  }
+  return byEntity;
+}
+
+async function refreshFromSharePoint(){
+  try{
+    setConnUI('error', null, null);
+    document.getElementById('conn-error').style.display='none';
+    const token = await getGraphToken();
+    const site = await graphGet(`https://graph.microsoft.com/v1.0/sites/${SP_HOST}:${SP_SITE_PATH}`, token);
+    const encodedFolder = SP_FOLDER_PATH.split('/').map(encodeURIComponent).join('/');
+    const children = await graphGet(`https://graph.microsoft.com/v1.0/sites/${site.id}/drive/root:/${encodedFolder}:/children`, token);
+    const xlsxFiles = (children.value||[]).filter(f => f.name && f.name.toLowerCase().endsWith('.xlsx'));
+    if(!xlsxFiles.length) throw new Error(`No .xlsx files found in "${SP_FOLDER_PATH}".`);
+
+    const errors = [];
+    const leadsByEntity = {};
+    const spendByEntity = {IFT:{}, Quorse:{}};
+    const loadedNames = [];
+
+    for(const f of xlsxFiles){
+      const buf = await (await fetch(f['@microsoft.graph.downloadUrl'])).arrayBuffer();
+      const wb = XLSX.read(buf, {type:'array', cellDates:true});
+      const sheetName = wb.SheetNames[0];
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
+      if(!rows.length){ errors.push(`${f.name} — sheet is empty`); continue; }
+      const kind = classifyRows(rows);
+      if(kind === 'leads'){
+        const parsed = await parseLeadsRows(rows, f.name, errors);
+        for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
+        loadedNames.push(f.name);
+      } else if(kind === 'spending'){
+        const parsed = parseSpendingRows(rows, f.name, errors);
+        for(const ent of ['IFT','Quorse']) Object.assign(spendByEntity[ent], parsed[ent]);
+        loadedNames.push(f.name);
+      } else {
+        errors.push(`${f.name} — couldn't identify dataset type (expected leads or spending columns), skipped`);
+      }
+    }
+
+    if(errors.length){
+      setConnUI('error', 'SharePoint: '+SP_FOLDER_PATH, errors.join(' | '));
+      return;
+    }
+    if(!leadsByEntity.IFT && !leadsByEntity.Quorse) throw new Error('No valid lead records found across the loaded files.');
+
+    COMPANIES = {
+      IFT: {records: leadsByEntity.IFT || COMPANIES.IFT.records, label:'Info-Trek', spend: spendByEntity.IFT},
+      Quorse: {records: leadsByEntity.Quorse || COMPANIES.Quorse.records, label:'Quorse', spend: spendByEntity.Quorse}
+    };
+    refreshAllViews();
+    document.getElementById('conn-lastrefresh').textContent = new Date().toLocaleString('en-MY', {dateStyle:'medium', timeStyle:'short'});
+    setConnUI('connected', 'SharePoint: ' + loadedNames.join(', '), null);
+  } catch(e){
+    setConnUI('error', 'SharePoint: '+SP_FOLDER_PATH, e.message);
+  }
+}
+
+document.getElementById('btn-signin').addEventListener('click', signInMicrosoft);
+initMsal().catch(e=> setConnUI('error', null, 'Microsoft sign-in setup failed: '+e.message));
 </script>
 </body>
 </html>
