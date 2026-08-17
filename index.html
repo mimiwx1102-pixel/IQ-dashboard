@@ -2227,7 +2227,8 @@ function parseSpendingRows(rows, fileName, fallbackEntity, errors){
       if(entity !== 'IFT' && entity !== 'Quorse') continue;
 
       const rawMonth = row[kMonth];
-      const mo = excelDateToISO(rawMonth) || String(rawMonth||'').trim();
+      const rawMo = excelDateToISO(rawMonth) || String(rawMonth||'').trim();
+      const mo = /^\d{4}-\d{2}-\d{2}$/.test(rawMo) ? rawMo.slice(0,7) : rawMo;
       if(!mo || mo.toLowerCase()==='totla budget allocated' || mo.toLowerCase()==='total budget allocated') continue;
 
       const bucket = byEntity[entity][mo] = byEntity[entity][mo] || {
