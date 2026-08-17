@@ -1271,15 +1271,16 @@ function updateFooter(){
     `${co.label} Executive Console · Source: uploaded workbook (${co.records.length.toLocaleString('en-MY')} leads, Jan–Jul 2026)`;
 }
 
-initFiltersForCompany();
-populatePeriodSelect();
-render();
+// Do not render the hidden Company Dashboard during initial page load.
+// The CEO page is the default view; Company charts are rendered only when opened.
 
 </script>
 <script>
 /* ===================== CEO Executive Overview ===================== */
 let ceoState = { company:'all', year:'all', quarter:'all', month:'all', trendG:'monthly' };
 let ceoChannelSort = { key:'revenue', dir:'desc' };
+let ceoCombinedCache = null;
+function invalidateCeoCache(){ ceoCombinedCache = null; }
 
 /* ---------- Page nav ---------- */
 document.getElementById('nav-ceo').addEventListener('click', ()=>showPage('ceo'));
@@ -1302,7 +1303,10 @@ function showPage(p){
 
 /* ---------- Data helpers ---------- */
 function taggedRecords(co){ return COMPANIES[co].records.map(d=>({...d, brand:co})); }
-function ceoAllCombined(){ return [...taggedRecords('IFT'), ...taggedRecords('Quorse')]; }
+function ceoAllCombined(){
+  if(!ceoCombinedCache) ceoCombinedCache = [...taggedRecords('IFT'), ...taggedRecords('Quorse')];
+  return ceoCombinedCache;
+}
 function combinedAllMonths(){ return [...new Set(ceoAllCombined().map(d=>d.month))].sort(); }
 function combinedAllQuarters(){ return [...new Set(ceoAllCombined().map(d=>d.q))].sort(); }
 function companyMonthSpend(co, m){
@@ -1835,6 +1839,10 @@ function refreshAllViews(){
   }
 }
 
+if(window.Chart){
+  Chart.defaults.animation = false;
+  Chart.defaults.responsiveAnimationDuration = 0;
+}
 initCeoFilters();
 renderCeoAll();
 
@@ -1968,6 +1976,7 @@ async function loadAndParseFile(file){
   const wb = XLSX.read(buf, {type:'array', cellDates:true});
   const newCompanies = parseWorkbook(wb, file.name);
   COMPANIES = newCompanies;
+  invalidateCeoCache();
   refreshAllViews();
   const now = new Date();
   document.getElementById('conn-lastrefresh').textContent = now.toLocaleString('en-MY', {dateStyle:'medium', timeStyle:'short'});
@@ -2316,6 +2325,7 @@ async function refreshFromSharePoint(){
       IFT: {records: leadsByEntity.IFT || COMPANIES.IFT.records, label:'Info-Trek', spend: spendByEntity.IFT},
       Quorse: {records: leadsByEntity.Quorse || COMPANIES.Quorse.records, label:'Quorse', spend: spendByEntity.Quorse}
     };
+    invalidateCeoCache();
     refreshAllViews();
     document.getElementById('conn-lastrefresh').textContent = new Date().toLocaleString('en-MY', {dateStyle:'medium', timeStyle:'short'});
     setConnUI('connected', 'SharePoint: ' + loadedNames.join(', '), null);
