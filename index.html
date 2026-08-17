@@ -1867,14 +1867,30 @@ function setConnUI(status, sourceName, errMsg){
 }
 
 function excelDateToISO(v){
-  if(v instanceof Date) return v.toISOString().slice(0,10);
-  if(typeof v === 'number'){
+  if(v instanceof Date && !isNaN(v.getTime())){
+    return v.toISOString().slice(0,10);
+  }
+  if(typeof v === 'number' && isFinite(v)){
     const d = XLSX.SSF.parse_date_code(v);
-    return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+    if(d && d.y && d.m && d.d){
+      return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+    }
   }
   if(typeof v === 'string'){
-    const d = new Date(v);
-    if(!isNaN(d)) return d.toISOString().slice(0,10);
+    const s = v.trim();
+    if(!s) return null;
+    const direct = new Date(s);
+    if(!isNaN(direct.getTime())) return direct.toISOString().slice(0,10);
+
+    // Common DD/MM/YYYY or DD-MM-YYYY text dates.
+    const m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+    if(m){
+      const day = parseInt(m[1],10), mon = parseInt(m[2],10), yr = parseInt(m[3],10);
+      const d = new Date(yr, mon-1, day);
+      if(d.getFullYear()===yr && d.getMonth()===mon-1 && d.getDate()===day){
+        return `${yr}-${String(mon).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      }
+    }
   }
   return null;
 }
@@ -1889,93 +1905,37 @@ function findKey(row, candidates){
   return null;
 }
 
-function parseWorkbook(wb){
-  const leadsSheetName = wb.SheetNames.find(n => n.trim().toLowerCase() === 'leads raw data');
-  if(!leadsSheetName) throw new Error('Sheet "Leads Raw Data" not found. Check your sheet name matches exactly.');
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[leadsSheetName], {defval:null});
-  if(!rows.length) throw new Error('"Leads Raw Data" sheet is empty.');
-
-  const kDate = findKey(rows[0], ['Date send','Date']);
-  const kEntity = findKey(rows[0], ['Entity','Business Unit','Company Unit']);
-  const kPl = findKey(rows[0], ['Platform']);
-  const kSrc = findKey(rows[0], ['Lead Source','Source']);
-  const kSp = findKey(rows[0], ['SP','Salesperson']);
-  const kCo = findKey(rows[0], ['Company','Organization','Client']);
-  const kPr = findKey(rows[0], ['Product Principal','Product']);
-  const kSt = findKey(rows[0], ['Status']);
-  const kRs = findKey(rows[0], ['Reason']);
-  const kCt = findKey(rows[0], ['Contacted']);
-  const kQt = findKey(rows[0], ['Quotation']);
-  const kQl = findKey(rows[0], ['Qualified']);
-  const kLv = findKey(rows[0], ['Value of lead','Lead Value']);
-  const kSv = findKey(rows[0], ['Value of sales','Sales Value']);
-  if(!kDate || !kEntity) throw new Error('Required columns "Date send" and "Entity" not found in Leads Raw Data.');
-
-  const byEntity = {};
-  for(const row of rows){
-    const entity = String(row[kEntity]||'').trim();
-    if(entity !== 'IFT' && entity !== 'Quorse') continue;
-    const iso = excelDateToISO(row[kDate]);
-    if(!iso) continue;
-    const [y,m] = iso.split('-');
-    const mnum = parseInt(m,10);
-    const qn = Math.ceil(mnum/3);
-    const rec = {
-      date: iso, month: `${y}-${m}`, mnum, year: parseInt(y,10), q: `${y}-Q${qn}`,
-      co: kCo ? row[kCo] : null, pl: kPl ? row[kPl] : null, src: kSrc ? row[kSrc] : null,
-      sp: kSp ? row[kSp] : null, pr: kPr ? row[kPr] : null, st: kSt ? row[kSt] : null,
-      rs: kRs ? row[kRs] : null, ct: kCt ? truthy(row[kCt]) : false,
-      qt: kQt ? truthy(row[kQt]) : false, ql: kQl ? truthy(row[kQl]) : false,
-      lv: kLv ? num(row[kLv]) : 0, sv: kSv ? num(row[kSv]) : 0
-    };
-    (byEntity[entity] = byEntity[entity]||[]).push(rec);
-  }
-  if(!byEntity.IFT && !byEntity.Quorse) throw new Error('No rows found with Entity = "IFT" or "Quorse". Check the Entity column values.');
-
-  const spendSheetName = wb.SheetNames.find(n => n.trim().toLowerCase() === 'spending');
+function parseWorkbook(wb, fileName='local file'){
+  const fallbackEntity = inferEntityFromFilename(fileName) || null;
+  const errors = [];
+  const leadsByEntity = {};
   const spendByEntity = {IFT:{}, Quorse:{}};
-  if(spendSheetName){
-    const srows = XLSX.utils.sheet_to_json(wb.Sheets[spendSheetName], {defval:null});
-    if(srows.length){
-      const sMonth = findKey(srows[0], ['Month']);
-      const sEntity = findKey(srows[0], ['Entity','Business Unit']);
-      const sWeb = findKey(srows[0], ['Website']);
-      const sSoc = findKey(srows[0], ['Social Media']);
-      const sEmail = findKey(srows[0], ['Email']);
-      const sOver = findKey(srows[0], ['Overhead']);
-      const sSeo = findKey(srows[0], ['SEO']);
-      const sSem = findKey(srows[0], ['SEM']);
-      for(const row of srows){
-        const entity = sEntity ? String(row[sEntity]||'').trim() : 'IFT';
-        if(entity !== 'IFT' && entity !== 'Quorse') continue;
-        const mo = sMonth ? String(row[sMonth]).trim() : null;
-        if(!mo) continue;
-        spendByEntity[entity][mo] = {
-          Website: sWeb?num(row[sWeb]):0, 'Social Media': sSoc?num(row[sSoc]):0,
-          Email: sEmail?num(row[sEmail]):0, Overhead: sOver?num(row[sOver]):0,
-          SEO: sSeo?num(row[sSeo]):0, SEM: sSem?num(row[sSem]):0
-        };
-      }
+
+  for(const sheetName of wb.SheetNames){
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
+    if(!rows.length) continue;
+    const kind = classifyRows(rows, sheetName);
+    if(kind === 'leads'){
+      const parsed = parseLeadsRows(rows, `${fileName} (${sheetName})`, fallbackEntity, errors);
+      for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
+    } else if(kind === 'spending'){
+      const parsed = parseSpendingRows(rows, `${fileName} (${sheetName})`, fallbackEntity, errors);
+      for(const ent of ['IFT','Quorse']) Object.assign(spendByEntity[ent], parsed[ent]);
     }
   }
 
-  const out = {};
-  if(byEntity.IFT) out.IFT = {records: byEntity.IFT, label:'Info-Trek', spend: spendByEntity.IFT};
-  else out.IFT = COMPANIES.IFT; // keep last-known-good if this refresh didn't include IFT rows
-  if(byEntity.Quorse) out.Quorse = {records: byEntity.Quorse, label:'Quorse', spend: spendByEntity.Quorse};
-  else out.Quorse = COMPANIES.Quorse;
-  return out;
-}
-
-function refreshAllViews(){
-  initFiltersForCompany(); populatePeriodSelect(); render();
-  initCeoFilters(); renderCeoAll();
+  if(errors.length) throw new Error(errors.join(' | '));
+  if(!leadsByEntity.IFT && !leadsByEntity.Quorse) throw new Error(`${fileName} — no valid lead records found.`);
+  return {
+    IFT: {records: leadsByEntity.IFT || [], label:'Info-Trek', spend: spendByEntity.IFT},
+    Quorse: {records: leadsByEntity.Quorse || [], label:'Quorse', spend: spendByEntity.Quorse}
+  };
 }
 
 async function loadAndParseFile(file){
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, {type:'array', cellDates:true});
-  const newCompanies = parseWorkbook(wb);
+  const newCompanies = parseWorkbook(wb, file.name);
   COMPANIES = newCompanies;
   refreshAllViews();
   const now = new Date();
@@ -2097,11 +2057,21 @@ async function signInMicrosoft(){
   }
 }
 
-function classifyRows(rows){
+function classifyRows(rows, sheetName=''){
   if(!rows.length) return null;
+  const sn = String(sheetName||'').trim().toLowerCase();
+  // Prefer the actual sheet name so ROI / ads-tracking sheets are not
+  // mistaken for spending just because they contain a "Spend" column.
+  if(sn.includes('leads raw data') || sn === 'raw data' || sn === 'raw data') return 'leads';
+  if(sn === 'spending' || sn.includes('spending')) return 'spending';
+
   const keys = Object.keys(rows[0]).map(k=>k.trim().toLowerCase());
-  if(keys.includes('spend')) return 'spending';
-  if(keys.includes('status') || keys.includes('product principal')) return 'leads';
+  if(keys.includes('date') || keys.includes('date send')){
+    if(keys.includes('status')) return 'leads';
+  }
+  if(keys.includes('month') && (keys.includes('total spend') || keys.includes('spend'))){
+    return 'spending';
+  }
   return null;
 }
 
@@ -2119,29 +2089,55 @@ async function parseLeadsRows(rows, fileName, fallbackEntity, errors){
   const kSrc = findKey(rows[0], ['Lead Source','Source']);
   const kSp = findKey(rows[0], ['SP','Sales Person','Salesperson']);
   const kCo = findKey(rows[0], ['Company','Organization','Client']);
-  const kPr = findKey(rows[0], ['Product Principal','Product']);
+  const kPr = findKey(rows[0], ['Product Principal','Category/Product Principal','Product']);
   const kSt = findKey(rows[0], ['Status']);
   const kRs = findKey(rows[0], ['Reason']);
   const kCt = findKey(rows[0], ['Contacted']);
   const kQt = findKey(rows[0], ['Quotation']);
   const kQl = findKey(rows[0], ['Qualified']);
-  const kLv = findKey(rows[0], ['Value of lead','Lead Value']);
-  const kSv = findKey(rows[0], ['Value of sales','Sales Value']);
+  const kLv = findKey(rows[0], ['Value of lead','Value of Leads','Lead Value']);
+  const kSv = findKey(rows[0], ['Value of sales','Values of Sales','Sales Value']);
   const missing = [];
   if(!kDate) missing.push('Date / Date send');
   if(!kEntity && !fallbackEntity) missing.push('Entity (or a recognizable company name in the filename)');
   if(!kSt) missing.push('Status');
-  if(missing.length){ errors.push(`${fileName} — missing required column(s): ${missing.join(', ')}`); return {}; }
+  if(missing.length){
+    errors.push(`${fileName} — missing required column(s): ${missing.join(', ')}`);
+    return {};
+  }
 
   const byEntity = {};
+  let skippedBlankDates = 0;
+  let skippedInvalidDates = 0;
+
   for(const row of rows){
+    // Ignore fully blank/placeholder rows that exist because the workbook
+    // contains formatted rows below the real data.
+    const rowHasData = Object.values(row).some(v => v !== null && v !== undefined && String(v).trim() !== '');
+    if(!rowHasData) continue;
+
     let entity = kEntity ? String(row[kEntity]||'').trim() : '';
     if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
     if(entity !== 'IFT' && entity !== 'Quorse') continue;
-    const iso = excelDateToISO(row[kDate]);
-    if(!iso){ errors.push(`${fileName} — invalid date on a row, skipped`); continue; }
+
+    const rawDate = row[kDate];
+    if(rawDate === null || rawDate === undefined || String(rawDate).trim() === ''){
+      skippedBlankDates++;
+      continue;
+    }
+
+    const iso = excelDateToISO(rawDate);
+    if(!iso){
+      skippedInvalidDates++;
+      continue;
+    }
+
     const [y,m] = iso.split('-');
     const mnum = parseInt(m,10);
+    if(!mnum || mnum < 1 || mnum > 12){
+      skippedInvalidDates++;
+      continue;
+    }
     const qn = Math.ceil(mnum/3);
     const rec = {
       date: iso, month: `${y}-${m}`, mnum, year: parseInt(y,10), q: `${y}-Q${qn}`,
@@ -2153,6 +2149,12 @@ async function parseLeadsRows(rows, fileName, fallbackEntity, errors){
     };
     (byEntity[entity] = byEntity[entity]||[]).push(rec);
   }
+
+  if(skippedInvalidDates){
+    errors.push(`${fileName} — ${skippedInvalidDates} row(s) had an unrecognized date and were skipped`);
+  }
+  // Blank-date rows are expected in some of these workbooks; do not turn
+  // them into a dashboard-breaking error.
   return byEntity;
 }
 
@@ -2161,28 +2163,75 @@ function parseSpendingRows(rows, fileName, fallbackEntity, errors){
   const kEntity = findKey(rows[0], ['Entity','Business Unit']);
   const kPl = findKey(rows[0], ['Platform']);
   const kSpend = findKey(rows[0], ['Spend']);
-  const missing = [];
-  if(!kMonth) missing.push('Month/Date');
-  if(!kEntity && !fallbackEntity) missing.push('Entity (or a recognizable company name in the filename)');
-  if(!kPl) missing.push('Platform');
-  if(!kSpend) missing.push('Spend');
-  if(missing.length){
-    errors.push(`${fileName} — missing required column(s) for Spending: ${missing.join(', ')}`);
-    return {};
+
+  // Normalized long-form spending table: Month | Entity | Platform | Spend
+  if(kMonth && kPl && kSpend){
+    const byEntity = {IFT:{}, Quorse:{}};
+    const platformMap = {
+      'website':'Website','social media':'Social Media','social':'Social Media',
+      'email':'Email','overhead':'Overhead','seo':'SEO','sem':'SEM',
+      'maintenance':'Overhead','outsource':'Overhead','outsourcing':'Overhead',
+      'xhs':'Social Media','fb ads spend':'Social Media',
+      'linkedin ads spend':'Social Media','google display':'Social Media',
+      'mailchimp':'Email'
+    };
+    for(const row of rows){
+      let entity = kEntity ? String(row[kEntity]||'').trim() : '';
+      if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
+      if(entity !== 'IFT' && entity !== 'Quorse') continue;
+      const mo = excelDateToISO(row[kMonth]) || String(row[kMonth]||'').trim();
+      const plKey = platformMap[String(row[kPl]||'').trim().toLowerCase()];
+      if(!mo || !plKey) continue;
+      byEntity[entity][mo] = byEntity[entity][mo] || {Website:0,'Social Media':0,Email:0,Overhead:0,SEO:0,SEM:0};
+      byEntity[entity][mo][plKey] += num(row[kSpend]);
+    }
+    return byEntity;
   }
-  const byEntity = {IFT:{}, Quorse:{}};
-  const platformMap = {'website':'Website','social media':'Social Media','social':'Social Media','email':'Email','overhead':'Overhead','seo':'SEO','sem':'SEM'};
-  for(const row of rows){
-    let entity = kEntity ? String(row[kEntity]||'').trim() : '';
-    if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
-    if(entity !== 'IFT' && entity !== 'Quorse') continue;
-    const mo = String(row[kMonth]).trim();
-    const plKey = platformMap[String(row[kPl]||'').trim().toLowerCase()];
-    if(!mo || !plKey) continue;
-    byEntity[entity][mo] = byEntity[entity][mo] || {Website:0,'Social Media':0,Email:0,Overhead:0,SEO:0,SEM:0};
-    byEntity[entity][mo][plKey] += num(row[kSpend]);
+
+  // The actual IFT/Quorse dashboard files use a wide spending layout:
+  // Month | Maintenance | OutSource | SEM | SEO | MailChimp | XHS |
+  // FB Ads Spend | Linkedin Ads Spend | Google Display | Total Spend
+  if(kMonth){
+    const headers = Object.keys(rows[0]);
+    const wideMap = {
+      'maintenance':'Overhead',
+      'outsource':'Overhead',
+      'outsourcing':'Overhead',
+      'sem':'SEM',
+      'seo':'SEO',
+      'mailchimp':'Email',
+      'xhs':'Social Media',
+      'fb ads spend':'Social Media',
+      'linkedin ads spend':'Social Media',
+      'google display':'Social Media',
+      'website':'Website',
+      'social media':'Social Media',
+      'email':'Email',
+      'overhead':'Overhead'
+    };
+    const byEntity = {IFT:{}, Quorse:{}};
+    for(const row of rows){
+      let entity = kEntity ? String(row[kEntity]||'').trim() : '';
+      if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
+      if(entity !== 'IFT' && entity !== 'Quorse') continue;
+
+      const rawMonth = row[kMonth];
+      const mo = excelDateToISO(rawMonth) || String(rawMonth||'').trim();
+      if(!mo || mo.toLowerCase()==='totla budget allocated' || mo.toLowerCase()==='total budget allocated') continue;
+
+      const bucket = byEntity[entity][mo] = byEntity[entity][mo] || {
+        Website:0,'Social Media':0,Email:0,Overhead:0,SEO:0,SEM:0
+      };
+      for(const h of headers){
+        const target = wideMap[String(h).trim().toLowerCase()];
+        if(target) bucket[target] += num(row[h]);
+      }
+    }
+    return byEntity;
   }
-  return byEntity;
+
+  errors.push(`${fileName} — couldn't interpret its Spending layout`);
+  return {};
 }
 
 async function refreshFromSharePoint(){
@@ -2209,7 +2258,7 @@ async function refreshFromSharePoint(){
       for(const sheetName of wb.SheetNames){
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
         if(!rows.length) continue;
-        const kind = classifyRows(rows);
+        const kind = classifyRows(rows, sheetName);
         if(kind === 'leads'){
           const parsed = await parseLeadsRows(rows, `${f.name} (${sheetName})`, fallbackEntity, errors);
           for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
