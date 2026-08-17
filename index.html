@@ -2046,7 +2046,7 @@ const MSAL_CONFIG = {
 };
 const SP_HOST = 'infotreksdnbhd.sharepoint.com';
 const SP_SITE_PATH = '/marketing';
-const SP_FOLDER_PATH = "Marketing Plan/IQ's Business Dashboard/Raw Data";
+const SP_FOLDER_PATH = "Marketing Plan/IQ's Business Dashboard";
 const GRAPH_SCOPES = ['Files.Read.All','User.Read'];
 
 let msalInstance = null;
@@ -2105,7 +2105,14 @@ function classifyRows(rows){
   return null;
 }
 
-async function parseLeadsRows(rows, fileName, errors){
+function inferEntityFromFilename(fileName){
+  const n = fileName.toLowerCase();
+  if(n.includes('ift') || n.includes('info trek') || n.includes('info-trek')) return 'IFT';
+  if(n.includes('quorse')) return 'Quorse';
+  return null;
+}
+
+async function parseLeadsRows(rows, fileName, fallbackEntity, errors){
   const kDate = findKey(rows[0], ['Date send','Date']);
   const kEntity = findKey(rows[0], ['Entity','Business Unit']);
   const kPl = findKey(rows[0], ['Platform']);
@@ -2122,13 +2129,14 @@ async function parseLeadsRows(rows, fileName, errors){
   const kSv = findKey(rows[0], ['Value of sales','Sales Value']);
   const missing = [];
   if(!kDate) missing.push('Date / Date send');
-  if(!kEntity) missing.push('Entity');
+  if(!kEntity && !fallbackEntity) missing.push('Entity (or a recognizable company name in the filename)');
   if(!kSt) missing.push('Status');
   if(missing.length){ errors.push(`${fileName} — missing required column(s): ${missing.join(', ')}`); return {}; }
 
   const byEntity = {};
   for(const row of rows){
-    const entity = String(row[kEntity]||'').trim();
+    let entity = kEntity ? String(row[kEntity]||'').trim() : '';
+    if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
     if(entity !== 'IFT' && entity !== 'Quorse') continue;
     const iso = excelDateToISO(row[kDate]);
     if(!iso){ errors.push(`${fileName} — invalid date on a row, skipped`); continue; }
@@ -2148,19 +2156,25 @@ async function parseLeadsRows(rows, fileName, errors){
   return byEntity;
 }
 
-function parseSpendingRows(rows, fileName, errors){
-  const kMonth = findKey(rows[0], ['Month']);
+function parseSpendingRows(rows, fileName, fallbackEntity, errors){
+  const kMonth = findKey(rows[0], ['Month','Date']);
   const kEntity = findKey(rows[0], ['Entity','Business Unit']);
   const kPl = findKey(rows[0], ['Platform']);
   const kSpend = findKey(rows[0], ['Spend']);
-  if(!kMonth || !kEntity || !kPl || !kSpend){
-    errors.push(`${fileName} — missing required column(s) for Spending: Date/Month, Entity, Platform, Spend`);
+  const missing = [];
+  if(!kMonth) missing.push('Month/Date');
+  if(!kEntity && !fallbackEntity) missing.push('Entity (or a recognizable company name in the filename)');
+  if(!kPl) missing.push('Platform');
+  if(!kSpend) missing.push('Spend');
+  if(missing.length){
+    errors.push(`${fileName} — missing required column(s) for Spending: ${missing.join(', ')}`);
     return {};
   }
   const byEntity = {IFT:{}, Quorse:{}};
   const platformMap = {'website':'Website','social media':'Social Media','social':'Social Media','email':'Email','overhead':'Overhead','seo':'SEO','sem':'SEM'};
   for(const row of rows){
-    const entity = String(row[kEntity]||'').trim();
+    let entity = kEntity ? String(row[kEntity]||'').trim() : '';
+    if(entity !== 'IFT' && entity !== 'Quorse') entity = fallbackEntity;
     if(entity !== 'IFT' && entity !== 'Quorse') continue;
     const mo = String(row[kMonth]).trim();
     const plKey = platformMap[String(row[kPl]||'').trim().toLowerCase()];
@@ -2188,23 +2202,26 @@ async function refreshFromSharePoint(){
     const loadedNames = [];
 
     for(const f of xlsxFiles){
+      const fallbackEntity = inferEntityFromFilename(f.name);
       const buf = await (await fetch(f['@microsoft.graph.downloadUrl'])).arrayBuffer();
       const wb = XLSX.read(buf, {type:'array', cellDates:true});
-      const sheetName = wb.SheetNames[0];
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
-      if(!rows.length){ errors.push(`${f.name} — sheet is empty`); continue; }
-      const kind = classifyRows(rows);
-      if(kind === 'leads'){
-        const parsed = await parseLeadsRows(rows, f.name, errors);
-        for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
-        loadedNames.push(f.name);
-      } else if(kind === 'spending'){
-        const parsed = parseSpendingRows(rows, f.name, errors);
-        for(const ent of ['IFT','Quorse']) Object.assign(spendByEntity[ent], parsed[ent]);
-        loadedNames.push(f.name);
-      } else {
-        errors.push(`${f.name} — couldn't identify dataset type (expected leads or spending columns), skipped`);
+      let usedAnySheet = false;
+      for(const sheetName of wb.SheetNames){
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
+        if(!rows.length) continue;
+        const kind = classifyRows(rows);
+        if(kind === 'leads'){
+          const parsed = await parseLeadsRows(rows, `${f.name} (${sheetName})`, fallbackEntity, errors);
+          for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
+          usedAnySheet = true;
+        } else if(kind === 'spending'){
+          const parsed = parseSpendingRows(rows, `${f.name} (${sheetName})`, fallbackEntity, errors);
+          for(const ent of ['IFT','Quorse']) Object.assign(spendByEntity[ent], parsed[ent]);
+          usedAnySheet = true;
+        }
       }
+      if(usedAnySheet) loadedNames.push(f.name);
+      else errors.push(`${f.name} — couldn't identify any leads or spending sheet inside this file`);
     }
 
     if(errors.length){
