@@ -2276,6 +2276,51 @@ function parseSpendingRows(rows, fileName, fallbackEntity, errors){
   return {};
 }
 
+const workerSource = `
+  importScripts('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+  self.onmessage = async (e) => {
+    try {
+      const files = e.data.files || [];
+      const out = [];
+      for (const f of files) {
+        const r = await fetch(f.url);
+        if (!r.ok) throw new Error('Download failed (' + r.status + ') for ' + f.name);
+        const buf = await r.arrayBuffer();
+        const wb = XLSX.read(buf, {type:'array', cellDates:true});
+        const sheets = [];
+        for (const sheetName of wb.SheetNames) {
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
+          if (rows.length) sheets.push({name: sheetName, rows});
+        }
+        out.push({name:f.name, sheets});
+      }
+      self.postMessage({ok:true, files:out});
+    } catch (err) {
+      self.postMessage({ok:false, error: err && err.message ? err.message : String(err)});
+    }
+  };
+`;
+let sharePointParseWorker = null;
+function parseSharePointFilesInWorker(files){
+  return new Promise((resolve,reject)=>{
+    try{
+      if(sharePointParseWorker) sharePointParseWorker.terminate();
+      const blob = new Blob([workerSource], {type:'application/javascript'});
+      sharePointParseWorker = new Worker(URL.createObjectURL(blob));
+      sharePointParseWorker.onmessage = e => {
+        const d=e.data||{};
+        sharePointParseWorker.terminate(); sharePointParseWorker=null;
+        if(d.ok) resolve(d.files); else reject(new Error(d.error||'Background Excel parsing failed.'));
+      };
+      sharePointParseWorker.onerror = e => {
+        if(sharePointParseWorker) sharePointParseWorker.terminate(); sharePointParseWorker=null;
+        reject(new Error('Background Excel parser failed to start.'));
+      };
+      sharePointParseWorker.postMessage({files});
+    }catch(e){ reject(e); }
+  });
+}
+
 async function refreshFromSharePoint(){
   try{
     setConnUI('error', null, null);
@@ -2287,26 +2332,29 @@ async function refreshFromSharePoint(){
     const xlsxFiles = (children.value||[]).filter(f => f.name && f.name.toLowerCase().endsWith('.xlsx'));
     if(!xlsxFiles.length) throw new Error(`No .xlsx files found in "${SP_FOLDER_PATH}".`);
 
+    // IMPORTANT: Excel parsing runs in a Web Worker so the UI never freezes while
+    // SheetJS processes the large IFT workbook. Only the normalized sheet rows
+    // are returned to the main thread for the lightweight dashboard parser.
+    const workerFiles = xlsxFiles.map(f => ({name:f.name, url:f['@microsoft.graph.downloadUrl']}));
+    const parsedFiles = await parseSharePointFilesInWorker(workerFiles);
+
     const errors = [];
     const leadsByEntity = {};
     const spendByEntity = {IFT:{}, Quorse:{}};
     const loadedNames = [];
 
-    for(const f of xlsxFiles){
+    for(const f of parsedFiles){
       const fallbackEntity = inferEntityFromFilename(f.name);
-      const buf = await (await fetch(f['@microsoft.graph.downloadUrl'])).arrayBuffer();
-      const wb = XLSX.read(buf, {type:'array', cellDates:true});
       let usedAnySheet = false;
-      for(const sheetName of wb.SheetNames){
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {defval:null});
-        if(!rows.length) continue;
-        const kind = classifyRows(rows, sheetName);
+      for(const sh of f.sheets){
+        const rows = sh.rows;
+        const kind = classifyRows(rows, sh.name);
         if(kind === 'leads'){
-          const parsed = await parseLeadsRows(rows, `${f.name} (${sheetName})`, fallbackEntity, errors);
+          const parsed = await parseLeadsRows(rows, `${f.name} (${sh.name})`, fallbackEntity, errors);
           for(const ent of Object.keys(parsed)) leadsByEntity[ent] = (leadsByEntity[ent]||[]).concat(parsed[ent]);
           usedAnySheet = true;
         } else if(kind === 'spending'){
-          const parsed = parseSpendingRows(rows, `${f.name} (${sheetName})`, fallbackEntity, errors);
+          const parsed = parseSpendingRows(rows, `${f.name} (${sh.name})`, fallbackEntity, errors);
           for(const ent of ['IFT','Quorse']) Object.assign(spendByEntity[ent], parsed[ent]);
           usedAnySheet = true;
         }
