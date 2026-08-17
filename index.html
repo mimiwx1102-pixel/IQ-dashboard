@@ -1289,6 +1289,15 @@ function showPage(p){
   document.getElementById('nav-company').classList.toggle('active', p==='company');
   document.getElementById('page-ceo').style.display = p==='ceo' ? '' : 'none';
   document.getElementById('app').style.display = p==='company' ? '' : 'none';
+  // Render only when the user actually opens that page.
+  if(p==='ceo'){
+    initCeoFilters();
+    renderCeoAll();
+  } else {
+    initFiltersForCompany();
+    populatePeriodSelect();
+    render();
+  }
 }
 
 /* ---------- Data helpers ---------- */
@@ -1811,13 +1820,19 @@ function renderCeoAll(){
   renderCeoRecommendations();
 }
 
-// Re-render both dashboard views after live data is refreshed.
+// Refresh only the page the user is currently viewing.
+// Rendering every chart on every refresh was unnecessarily expensive and could
+// freeze the browser after SharePoint data was loaded.
 function refreshAllViews(){
-  initFiltersForCompany();
-  populatePeriodSelect();
-  render();
-  initCeoFilters();
-  renderCeoAll();
+  const ceoVisible = document.getElementById('page-ceo').style.display !== 'none';
+  if(ceoVisible){
+    initCeoFilters();
+    renderCeoAll();
+  } else {
+    initFiltersForCompany();
+    populatePeriodSelect();
+    render();
+  }
 }
 
 initCeoFilters();
@@ -1826,6 +1841,12 @@ renderCeoAll();
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
+// Keep refreshes responsive: the dashboard contains many charts, so animations
+// are disabled during data refresh/render cycles.
+if(window.Chart){
+  Chart.defaults.animation = false;
+  Chart.defaults.responsiveAnimationDuration = 0;
+}
 /* ===================== Live Data Connection ===================== */
 const DB_NAME='ift_dashboard_conn', STORE='handles', HANDLE_KEY='raw_data_file';
 
