@@ -1810,6 +1810,16 @@ function renderCeoAll(){
   renderCeoInsights();
   renderCeoRecommendations();
 }
+
+// Re-render both dashboard views after live data is refreshed.
+function refreshAllViews(){
+  initFiltersForCompany();
+  populatePeriodSelect();
+  render();
+  initCeoFilters();
+  renderCeoAll();
+}
+
 initCeoFilters();
 renderCeoAll();
 
