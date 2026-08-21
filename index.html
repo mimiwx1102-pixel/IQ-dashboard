@@ -1568,14 +1568,7 @@ function computeCombinedYTD(){
   const deptCost = DEPT_FIXED_MONTHLY*months*2;
   const deptPct = revenue>0 ? deptCost/revenue*100 : 0;
   const remaining = GP_PCT - merPct - deptPct - SALES_SPEND_PCT;
-  // Active Companies = distinct real client organizations (the "co" field) across
-  // both entities' combined records — a genuine count, not an invented figure.
-  const activeCompanies = new Set(
-    [...COMPANIES.IFT.records, ...COMPANIES.Quorse.records]
-      .map(d=>String(d.co||'').trim())
-      .filter(v=>v && v.toLowerCase()!=='personal' && v!=='-' && v.toLowerCase()!=='n/a')
-  ).size;
-  return {revenue, spend, leads, closed, closingRate, merPct, roiX, remaining, activeCompanies};
+  return {revenue, spend, leads, closed, closingRate, merPct, roiX, remaining};
 }
 
 /* ---------- Section 1: Combined KPIs ---------- */
@@ -1593,7 +1586,7 @@ function statRow(label, val){
   </div>`;
 }
 function sparklineSVG(values, color){
-  if(!values.length) return '';
+  if(!Array.isArray(values) || !values.length) return '';
   const w=100,h=32,pad=2;
   const min=Math.min(...values), max=Math.max(...values);
   const range = (max-min)||1;
@@ -1642,6 +1635,7 @@ function renderCeoKPIs(){
     const spend = combinedMonthSpend(m);
     return spend>0 ? rev/spend : 0;
   });
+  const closedSeries = trailingMonthSeries(m => ceoAllCombined().filter(d=>d.month===m && d.st==='Closed').length);
 
   const el = document.getElementById('ceo-kpi-grid');
   el.innerHTML = [
@@ -1649,7 +1643,7 @@ function renderCeoKPIs(){
     kpiCardV2('👥', 'Total Leads', fmtNum(ytd.leads), deltaLine('leads'), leadsSeries, COLORS.teal),
     kpiCardV2('◎', 'Conversion Rate', fmtPct(ytd.closingRate), deltaLine('closingRate'), convSeries, COLORS.olive),
     kpiCardV2('📈', 'ROI (MER)', (ytd.roiX!=null?ytd.roiX.toFixed(2)+'x':'—'), 'revenue ÷ marketing spend', roiSeries, COLORS.amber),
-    kpiCardV2('🏢', 'Active Companies', fmtNum(ytd.activeCompanies), 'distinct client organizations, YTD', null, COLORS.slate),
+    kpiCardV2('✓', 'Closed Deals', fmtNum(ytd.closed), deltaLine('closed'), closedSeries, COLORS.slate),
   ].join('');
 }
 
