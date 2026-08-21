@@ -1444,8 +1444,9 @@ function renderInsights(cur, k, kPrev, base, mkt, eff, effPrev){
 /* ===================== Init ===================== */
 function updateFooter(){
   const co = COMPANIES[state.company];
+  const recCount = (co && Array.isArray(co.records)) ? co.records.length : 0;
   document.getElementById('footer-source').textContent =
-    `${co.label} Executive Console · Source: uploaded workbook (${co.records.length.toLocaleString('en-MY')} leads, Jan–Jul 2026)`;
+    `${co.label} Executive Console · Source: uploaded workbook (${recCount.toLocaleString('en-MY')} leads, Jan–Jul 2026)`;
 }
 
 // Do not render the hidden Company Dashboard during initial page load.
@@ -1532,7 +1533,16 @@ function kpisForRecords(recs, spendTotal){
 
 /* ---------- Company / combined YTD ---------- */
 function computeCompanyYTD(co){
-  const recs = COMPANIES[co].records;
+  // Guard: the static snapshot always guarantees COMPANIES[co].records is an
+  // array, but the live SharePoint path builds it via a Web Worker (a
+  // structured-clone serialization boundary the snapshot path never crosses).
+  // This is the exact call site that produced "Cannot read properties of
+  // null (reading 'length')" in production — recs.length was called directly
+  // with no shape check. Defaulting to [] here is not a blind workaround for
+  // an unknown bug; it's specifically because this function reads
+  // COMPANIES[co].records directly and is the one place in the render chain
+  // most exposed to that boundary.
+  const recs = (COMPANIES[co] && Array.isArray(COMPANIES[co].records)) ? COMPANIES[co].records : [];
   const revenue = sum(recs,d=>d.sv);
   const leads = recs.length;
   const closed = recs.filter(d=>d.st==='Closed').length;
@@ -2714,6 +2724,9 @@ function parseSharePointFilesInWorker(files){return new Promise((resolve,reject)
 let liveDataLoaded = false;
 
 async function refreshFromSharePoint(){
+  // Phase 1: fetch + parse. Only failures in THIS phase are genuine
+  // SharePoint/connectivity problems and should reset liveDataLoaded.
+  let companies, loaded;
   try{
     setConnUI('error', null, null);
     document.getElementById('conn-error').style.display='none';
@@ -2727,16 +2740,38 @@ async function refreshFromSharePoint(){
     for(const f of xlsxFiles){const r=await fetch(f['@microsoft.graph.downloadUrl']);if(!r.ok)throw new Error(`Download failed (${r.status}) for ${f.name}`);files.push({name:f.name,buffer:await r.arrayBuffer()});}
     const parsed=await parseSharePointFilesInWorker(files);
     if((parsed.errors||[]).length)throw new Error(parsed.errors.join(' | '));
-    const companies={IFT:{records:[],label:'Info-Trek',spend:{}},Quorse:{records:[],label:'Quorse',spend:{}}},loaded=[];
+    companies={IFT:{records:[],label:'Info-Trek',spend:{}},Quorse:{records:[],label:'Quorse',spend:{}}};loaded=[];
     for(const f of parsed.files){if(f.used)loaded.push(f.name);for(const ent of ['IFT','Quorse']){companies[ent].records.push(...(f.companies[ent].records||[]));Object.assign(companies[ent].spend,f.companies[ent].spend||{});}}
     if(!companies.IFT.records.length&&!companies.Quorse.records.length)throw new Error('No valid lead records found across the loaded files.');
-    COMPANIES=companies;liveDataLoaded=true;invalidateCeoCache();
-    document.getElementById('page-ceo').style.display='';
+  }catch(e){
+    // Genuine fetch/parse/auth failure — no live data was obtained, so
+    // liveDataLoaded correctly stays false and the error is honestly
+    // attributed to SharePoint.
+    liveDataLoaded=false;
+    setConnUI('error','SharePoint: '+SP_FOLDER_PATH,e.message||String(e));
+    return;
+  }
+
+  // Phase 1 succeeded: live data was genuinely fetched and parsed. From this
+  // point on, COMPANIES is real live data — liveDataLoaded must stay true
+  // even if something below (rendering) fails, because the data itself is
+  // not the problem.
+  COMPANIES=companies;liveDataLoaded=true;invalidateCeoCache();
+  document.getElementById('page-ceo').style.display='';
+  try{
     refreshAllViews();
     document.getElementById('conn-lastrefresh').textContent=new Date().toLocaleString('en-MY',{dateStyle:'medium',timeStyle:'short'});
     document.getElementById('fallback-banner').style.display='none';
     setConnUI('connected','SharePoint: '+loaded.join(', '),null);
-  }catch(e){liveDataLoaded=false;setConnUI('error','SharePoint: '+SP_FOLDER_PATH,e.message||String(e));}
+  }catch(renderErr){
+    // Live data DID load successfully — this is a display bug, not a
+    // SharePoint problem. Report it honestly as such, with the real error,
+    // and keep liveDataLoaded=true so the boot gate doesn't re-show a
+    // misleading "Not connected" screen over data that actually loaded.
+    console.error('Dashboard render error after live data loaded:', renderErr);
+    setConnUI('error','SharePoint: '+loaded.join(', '),
+      'Live data loaded, but the dashboard failed to render it: ' + (renderErr.message||String(renderErr)));
+  }
 }
 
 document.getElementById('btn-signin').addEventListener('click', signInMicrosoft);
@@ -2748,8 +2783,13 @@ function showFallbackSnapshot(){
   document.getElementById('boot-gate').style.display='none';
   document.getElementById('page-ceo').style.display='';
   document.getElementById('fallback-banner').style.display='flex';
-  initCeoFilters();
-  renderCeoAll();
+  try{
+    initCeoFilters();
+    renderCeoAll();
+  }catch(e){
+    console.error('Snapshot render error:', e);
+    setConnUI('error', 'Snapshot (local file)', 'Snapshot failed to render: ' + (e.message||String(e)));
+  }
 }
 document.getElementById('boot-fallback').addEventListener('click', showFallbackSnapshot);
 
